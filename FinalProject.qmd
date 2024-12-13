@@ -1,0 +1,229 @@
+---
+title: "Final Project: Voting and Polling Access"
+subtitle: "Katherine Nunez"
+format:
+  html:
+    df-print: kable
+    embed-resources: true
+    link-external-newwindow: true
+    link-external-icon: true
+editor: visual
+---
+
+## Final Project
+
+### Introduction
+
+As the election cycle winds down, voting and access to remain pertinent issues. Lawsuits, provisional ballots, and mail-in ballots continued to be processed for days to weeks after election day in both 2020 and 2024, continuing to emphasize the importance of voting.
+
+The process how one votes is just as important as voting itself. Access to ballots, ballot boxes, and voting locations is critical to the process. There are a multitude of factors that impact one’s ability to access the ballot box, including legislation, voting access amendments, and the weather on the day of the election. One that we will hone in on today is poll locations - or where voters can, in person, cast their vote.
+
+For this Project, I will examine Washington, DC's polling locations and do a cursory analysis of if they align with population centers in DC. This could lead to additional analysis and hypothesis testing, indicating where additional polling locations should be placed for upcoming elections in 2026 or 2028.
+
+## Beginning the Setup
+
+First, I'll initialize the packages that I'll need for this project, below:
+
+```{r}
+set.seed(6805)
+cb_palette <- c(
+  "#E69F00", "#56B4E9", "#009E73", "#F0E442","#0072B2", "#D55E00", "#CC79A7"
+)
+library(tidyverse) |> suppressPackageStartupMessages()
+library(sf) |> suppressPackageStartupMessages()
+library(mapview) |> suppressPackageStartupMessages()
+library(spatstat) |> suppressPackageStartupMessages()
+library(concaveman) |> suppressPackageStartupMessages()
+```
+
+Let's begin by loading our data from Open Data DC, which holds so much information!
+
+The datasets can generall be found here: https://datahub-dc-dcgis.hub.arcgis.com/search?collection=Dataset 
+
+DC Voting locations: https://opendata.dc.gov/datasets/DCGIS::election-day-vote-center/explore?location=38.904146%2C-77.009213%2C10.75
+
+
+```{r}
+#| label: load-data
+voting_df <- read_csv("countypres_2000-2020.csv", show_col_types = FALSE)
+voting_df |> head()
+```
+
+I loaded the following dataset in case a similar analysis needed to be done on Virginia (where I live!). It is loaded below:
+
+```{r}
+#| label: load-data
+polling_df <- read_csv("polling_places.csv", show_col_types = FALSE)
+polling_df |> head()
+```
+
+## Initial Scoping
+
+I live in Virginia, so I'm going to focus this analysis on Virginia counties (both due to my own interest and to ensure this and any other programs this code runs on does not crash). The below code narrows this data down to just the entries in Virgina.
+
+```{r}
+#| label: scope-data  
+dc_election_data <- voting_df %>%
+  filter(state == "DISTRICT OF COLUMBIA")
+head(dc_election_data)
+```
+
+Again, this below is prepping the voting dataset in case I need to extend this analysis to include Virginia as well.
+
+```{r}
+#| label: scope-data
+va_polling_data <- polling_df %>%
+  filter(state == "VA")
+head(va_polling_data)
+```
+
+There's something important to note in this polling dataset for Virginia - in 2012 (at the beginning of its data), some of the columns are empty (i.e., county_name and jurisdiction). I don't think this is a deal breaker because I can adjust the timeframe of my analysis (and I can potentially use the address of the polling location to figure some of this information out), but it is something to note.
+
+And finally, I'll load the voting locations in DC:
+
+```{r}
+#| label: load-data
+dc_voting_locations <- st_read("Election_Day_Vote_Center.shp")
+st_crs(dc_voting_locations) <- 3857
+dc_voting_locations <- st_transform(dc_voting_locations, 4326)
+mapview(dc_voting_locations)
+```
+
+To make sure this is write, I need to project this onto a map of DC - which will require some brief configuring.
+
+```{r}
+dc_voting_locations <- st_read("Election_Day_Vote_Center.csv")
+sf_data <- st_as_sf(dc_voting_locations, coords = c("X", "Y"), crs = 26985)
+sf_data <- st_transform(sf_data, crs = 4326)
+mapview(sf_data)
+
+```
+
+Success! That data looks great. Now I can do some initial visualizations.
+
+## Initial Visualizations
+
+Now that I have my two datasets (voting results by county and polling locations), I'm going to start with some initial visualizations of this data. To do this, I first need to load the US Census Bureau shapefiles for the District of Columbia so that I can assign coordinate points to the county data I have here.
+
+```{r}
+county_shapefile <- st_read("./Census_Tracts_in_2020/Census_Tracts_in_2020.shp")
+DC_Map <- mapview(county_shapefile)
+DC_Map
+```
+
+Let's start by simply overlaying the DC shapefile with the voting locations.
+
+```{r}
+DC_Voting <- mapview(sf_data)
+DC_Voting + DC_Map
+```
+
+Let's briefly do an heat map of those voting locations:
+
+
+```{r}
+sf_data_projected <- st_transform(sf_data, crs = 32618)
+
+coords <- st_coordinates(sf_data_projected) 
+window <- as.owin(st_bbox(sf_data_projected)) 
+
+ppp_data <- ppp(x = coords[, 1], y = coords[, 2], window = window)
+
+summary(ppp_data)
+
+bw <- bw.diggle(ppp_data) 
+int_cases <- density(ppp_data, sigma = bw, eps = 10)  
+
+plot(int_cases, main = "Spatial Density of Cases")
+```
+
+
+
+## Like in class - Testing Hyptotheses
+
+Looking at this initial heat map, the points do appear clustered near the middle of Washington, DC and in some sporadic outlying areas. Given this, as we did in the homework, I would hypothesize that there are some additional factors that influence this goegraphy through the form of latent first-order processes. Two hypoetheses would be as follows:
+
+* First-order hypothesis: Polling locations are placed in spots with strong "infrastructure", leading to clustering, or 
+* Second-order hypothesis: Polling stations "attract" one another.
+
+The **first-order hypothesis** seems more feasible here - schools, parks, and community centers are often voting centers, and maybe those are clustered in certain areas of high income in DC (for example). 
+
+So, as in class, I will seek to analyze the first-order characteristics of this pattern. I'll seek to estimate an intensity function from these points using the same packages as in the homework, such as 'spatstat' and its 'density.ppp()' function. 
+
+Because the voting locations are all around DC and the DC Board of Elections governs the voting for the whole district, the observation window shall be the entire District of Columbia. 
+
+I've started with the base code also provided in the homework - thank you Professor!
+
+```{r}
+#| label: observation-window
+dc_geom_url <- "https://github.com/jpowerj/dsan-content/raw/refs/heads/main/2024-fall-ppol6805/dc_window.gpkg"
+dc_sfc <- sf::st_read(dc_geom_url) 
+  
+if (!all(is.null(dc_sfc))) {
+  dc_sfc |> sf::st_as_sf() |> ggplot() +
+    geom_sf() +
+    theme_classic()
+} 
+```
+
+
+### Forming the ppp for Future Analysis
+
+Here, I'll work through some of the transformations required to put the data into a ppp and displaying the information using ggplot, as in the homework.
+
+```{r}
+#| label: forming-ppp
+school_sf <- st_transform(sf_data_projected, 3857)
+dc_sfc <- st_transform(dc_sfc, 3857)
+
+school_ppp <- as.ppp(st_coordinates(school_sf), W = st_bbox(dc_sfc))
+
+if (!all(is.null(school_ppp))) {
+  school_ppp |> sf::st_as_sf() |> ggplot() +
+    geom_sf() +
+    theme_classic()
+} 
+```
+
+
+### Plotting Intensity Functions
+
+Now, as in the homework, I'll use different bandwidth parameters to estimate the density functinons with greater and lesser confidence. The following are the three different estimates:
+
+1. `poll_lambda_default`: This uses the default bandwidth. 
+2. `poll_lambda_hiconf`: This uses sigma=1000, signifying high confidence that the existing polling locations will mirror new polling locations produced here. 
+3. `poll_lambda_lowconf`: This uses sigma=5000, signifying low confidence that the existing polling locations will mirror new polling locations produced here (i.e., that they will not mirror each other). 
+
+
+```{r}
+#| label: density-plots
+poll_est_default <- density(school_ppp) # Replace with default intensity function estimate
+poll_est_hiconf <- density(school_ppp, sigma = 1000) # Replace with sigma=1000 intensity function estimate
+poll_est_lowconf <- density(school_ppp, sigma = 5000) # Replace with sigma=5000 intensity function estimate
+
+if (!all(is.null(poll_est_default)) & !all(is.null(poll_est_hiconf)) & !all(is.null(poll_est_lowconf))) {
+  par(mfrow=c(1,3), mar=c(0,0,2,1))
+  plot(poll_est_default)
+  contour(poll_est_default, add=TRUE)
+  plot(poll_est_hiconf)
+  contour(poll_est_hiconf, add=TRUE)
+  plot(poll_est_lowconf)
+  contour(poll_est_lowconf, add=TRUE)
+} 
+```
+
+With this intensity function now visualized for the three different confidence levels, hopefully you can see a pattern in the choice of schools, that at least gives a **descriptive** (as opposed to **normative**) account of how the likelihood of schools being closed **increases** as we move from the west side to the east side of the city. For an example of a **covariate** that we could incorporate into a fancier analysis to try and **explain** this intensity function, see [this writeup](https://jjacobs.me/blog/posts/2023-11-27-dc-segregation/){target='_blank'}!
+
+
+
+## Application to Policy
+
+Now, let's take this visual and do at least a visual comparision of the population of DC:
+
+```{=html}
+<iframe width="780" height="500" src="https://www.dcpolicycenter.org/publications/regional-population-density-since-1970/" title="Population Map of DC Article"></iframe>
+```
+
+Or embed image from https://www.dcpolicycenter.org/wp-content/uploads/2019/07/beltway2010.png
+
+
